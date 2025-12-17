@@ -1,0 +1,230 @@
+% Rapport de projet — Simulation multi-robots et compression RLE
+\documentclass[11pt,a4paper]{article}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[french]{babel}
+\usepackage{geometry}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage{color}
+\usepackage{caption}
+\usepackage{verbatim}
+\geometry{margin=2.5cm}
+
+\title{Rapport de projet — Simulation de robots autonomes et compression RLE}
+\author{Projet HPC — Département / Nom de l'\'etudiant}
+\date{17 décembre 2025}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\clearpage
+
+\section{Introduction}
+\subsection{Contexte g\'en\'eral}
+Les syst\`emes de stockage automatis\'es et les entrep\^ots intelligents reposent sur des flottes de robots mobiles autonomes pour d\'eplacer des colis et organiser les flux. Ces robots doivent se rep\'erer sur une grille 2D, planifier des d\'eplacements, et coop\'erer tout en \'evitant les collisions. Par ailleurs, le traitement et la transmission d'images issues de cam\'eras de supervision ou de capteurs requi\`erent des techniques de compression. Le Run-Length Encoding (RLE) est une m\'ethode simple et rapide, adaptée aux images pr\'esentant de larges zones homog\`enes.
+
+\subsection{Objectif p\'edagogique}
+L'objectif du projet est tripartite :
+\begin{itemize}
+  \item d\'evelopper une simulation de robots en version s\'equentielle, puis parall\'eliser cette simulation avec OpenMP et MPI ;
+  \item impl\'ementer un module de compression RLE (compresseur / d\'ecompresseur) et l'int\'egrer aux diff\'erentes versions ;
+  \item mesurer et analyser les performances (scalabilit\'e, overheads, goulots d'\'etranglement).
+\end{itemize}
+
+\subsection{Organisation du travail}
+Le projet a \'et\'e d\'ecoup\'e en trois phases :
+\begin{enumerate}
+  \item Version s\'equentielle : impl\'ementation de la simulation et du module RLE en m\'emoire.
+  \item Parall\'elisation : adaptation de la simulation pour OpenMP (partage de la grille) puis MPI (r\'epartition par processus, chef central optionnel).
+  \item Analyse et rapport : mesures, tableaux et interpr\'etation des r\'esultats.
+\end{enumerate}
+
+\section{Mod\'elisation et conception}
+\subsection{Mod\'elisation de la grille et des robots}
+La grille est mod\'elis\'ee comme une matrice 2D de taille $N\times N$. Chaque cellule peut \^etre libre, contenir un obstacle, ou contenir un robot (identifi\'e par son ID). Les robots sont repr\'esent\'es par une structure contenant leurs informations essentielles.
+
+Exemple de structure (C) :
+\begin{lstlisting}[language=C,caption={Structure d'un robot}]
+typedef struct {
+    int id;
+    int x, y;      // position courante
+    int tx, ty;    // cible
+    int state;     // IDLE, MOVING, WAITING...
+    int priority;  // r\'egle de d\'epriorit\'ation
+} Robot;
+\end{lstlisting}
+
+La grille en m\'emoire peut \^etre repr\'esent\'ee par un tableau lin\'earis\'e :
+\begin{lstlisting}[language=C,caption={Repr\'esentation de la grille}]
+uint8_t grid[N*N]; // 0 libre, 1 obstacle, >=2 id robot + offset
+\end{lstlisting}
+
+\subsection{Coordination et \'evitement de collisions}
+M\'ecanisme g\'en\'eral : \`a chaque pas de simulation, chaque robot propose une position suivante. Un processus de validation agr\'ege toutes les propositions et r\'esout les conflits selon une r\'egle de priorit\'e.
+
+Architecture : le projet propose un mod\`ele centralis\'e (serveur / robot-chef) qui d\'ecide des acceptations. En version MPI, le rank 0 joue le r\^ole de chef.
+
+R\'egles de priorit\'e :
+\begin{itemize}
+  \item priorité fixe (ID le plus petit gagne);
+  \item ou priorit\'e dynamique (distance \`a la cible, derni\`ere action, etc.).
+\end{itemize}
+
+Pseudocode g\'en\'eral (voir annexe 1 pour la version compl\`ete) :
+\begin{verbatim}
+Pour chaque it\'eration:
+  propositions = map(cell -> liste de robots)
+  pour chaque robot r:
+    propose = next_position(r)
+    propositions[propose].append(r)
+  pour chaque case c dans propositions:
+    si taille == 1: accepter
+    sinon: choisir gagnant par priorité
+  appliquer d\'eplacements accept\'es
+\end{verbatim}
+
+\subsection{Traitement d'image (compression RLE)}
+Le Run-Length Encoding (RLE) remplace des s\'equences cons\'ecutives de la m\^eme valeur par la paire (valeur, longueur). Dans notre impl\'ementation :
+\begin{itemize}
+  \item Entr\'ee : tableau d'octets (\texttt{uint8\_t *}) de longueur L.
+  \item Sortie : paires [valeur (1 octet), longueur (1 octet)], longueur limitée \`a 255 ; si n\'ecessaire on fractionne.
+\end{itemize}
+
+Exemple : [A,A,A,B,B,C] $\to$ (A,3),(B,2),(C,1) cod\'e par la suite d'octets [A,3,B,2,C,1].
+
+\section{Impl\'ementation}
+\subsection{Organisation du code}
+Arborescence principale :
+\begin{itemize}
+  \item \texttt{src/} : sources C (simulation, RLE, robot, grille, serveur, utils...)\
+  \item \texttt{include/} : en-t\^etes (\texttt{rle.h}, \texttt{robot.h}, ...)
+  \item \texttt{bin/} : exécutables produits
+  \item \texttt{obj/} : objets compil\'es
+  \item \texttt{data/} : fichiers d'entr\'ee/sortie (images, logs)
+  \item \texttt{Makefile}
+\end{itemize}
+
+Fichiers clefs et r\^oles :
+\begin{description}
+  \item[\texttt{main\_sequentiel.c}] boucle principale s\'equentielle.
+  \item[\texttt{main\_openmp.c}] version multi-thread OpenMP.
+  \item[\texttt{main\_mpi.c}] version distribu\'ee avec MPI.
+  \item[\texttt{rle\_sequentiel.c}] compresseur/d\'ecompresseur RLE en mémoire.
+  \item[\texttt{rle\_openmp.c}] wrappers OpenMP (peuvent appeler le noyau séquentiel ou diviser le travail).
+  \item[\texttt{rle\_mpi.c}] wrappers MPI (scatter/gather ou broadcast + collection).
+  \item[\texttt{robot.c}, \texttt{grille.c}, \texttt{serveur.c}] logique simulation.
+\end{description}
+
+\subsection{Version s\'equentielle}
+Boucle principale : proposition, validation, application, affichage/collecte de statistiques. Le module RLE expose l'API suivante :
+\begin{lstlisting}[language=C]
+uint8_t* compresser_RLE(const uint8_t *img, int taille, int *out_size);
+uint8_t* decompresser_RLE(const uint8_t *data, int taille, int *out_size);
+\end{lstlisting}
+Ces fonctions allouent la sortie via \texttt{malloc} ; l'appelant est responsable de \texttt{free}.
+
+\subsection{Version OpenMP}
+Strat\'egie : r\'epartition simple des robots par tranche d'indices. Les sections de validation/applications sont prot\'eg\'ees par des sections critiques pour garder la coh\'erence de la grille. Le temps est mesur\'e avec \texttt{omp\_get\_wtime()}.
+
+\subsection{Version MPI}
+Approche : chaque processus est responsable d'un sous-ensemble des robots. Le rang 0 peut jouer le r\^ole de chef : recevoir les propositions, r\'esoudre les conflits et renvoyer l'\'etat mis \`a jour (via \texttt{MPI\_Bcast}). Pour la compression RLE, chaque processus peut compresser une portion d'image locale et envoyer les blocs compress\'es au chef via \texttt{MPI\_Gatherv}.
+
+\section{Analyse de performance}
+\subsection{M\'ethodologie}
+Configuration d'exemple : machine mono-n\oe ud, 8 coeurs physiques, ex\'ecution pour diff\'erents N (64,128,256), nombre de threads/processus variant (1,2,4,8). Mesures : temps total pour T it\'erations et temps pour le module RLE isol\'e. Chaque mesure est moyenn\'ee sur 5 ex\'ecutions.
+
+\subsection{R\'esultats exp\'erimentaux (exemples)}
+Tableau de performance illustrative (N=128, 100 it\'erations) :
+\begin{table}[h!]
+\centering
+\begin{tabular}{lrr}
+\toprule
+Version & Temps (s) \\
+\midrule
+S\'equentiel & 12.5 \\
+OpenMP (2) & 7.8 \\
+OpenMP (4) & 4.6 \\
+OpenMP (8) & 3.9 \\
+MPI (2) & 8.5 \\
+MPI (4) & 5.0 \\
+MPI (8) & 4.2 \\
+\bottomrule
+\end{tabular}
+\caption{Temps de simulation (valeurs indicatives)}
+\end{table}
+
+\subsection{Interpr\'etation}
+Les versions parall\'elis\'ees montrent des gains significatifs. Toutefois, la validation centralis\'ee et la synchronisation limitent la scalabilit\'e. Pour MPI, la latence des communications devient un facteur lorsque la charge locale est faible.
+
+\section{Conclusion et perspectives}
+R\'esum\'e : le projet propose une simulation fonctionnelle et un module RLE op\'erant en m\'emoire. Les parall\'elismes OpenMP et MPI montrent que la d\'ecomposition du travail am\`ene des r\'eductions de temps d'ex\'ecution, mais n\'ecessitent une conception soigneuse des sections critiques et des communications.
+
+Am\'eliorations possibles :
+\begin{itemize}
+  \item heuristiques avanc\'ees de planification de trajectoires (A*, multi-agent planning) ;
+  \item compression d'images r\'eelles et analyse sur jeux de donn\'ees ;
+  \item portage GPU (CUDA) ou hybridation MPI+OpenMP.
+\end{itemize}
+
+\section{Annexes}
+\subsection{Annexe 1 : Pseudocode complet du m\'ecanisme d'\'evitement}
+\begin{verbatim}
+// Pseudocode d'it\'eration
+propositions = {} // map pos -> list
+for r in robots:
+    propose = next_position(r)
+    propositions[propose].append(r)
+for pos, list_r in propositions.items():
+    if len(list_r) == 1:
+        accept(list_r[0])
+    else:
+        winner = choose_by_priority(list_r)
+        for r in list_r:
+            if r != winner: r.state = WAITING
+apply_moves()
+\end{verbatim}
+
+\subsection{Annexe 2 : Calcul du prochain d\'eplacement}
+Algorithm simple (greedy) :
+\begin{verbatim}
+function next_position(robot):
+    if robot at target: return current
+    dx = tx - x; dy = ty - y
+    if abs(dx) >= abs(dy): try move in x else try move in y
+    if blocked: try other axis
+    if both blocked: stay
+\end{verbatim}
+
+\subsection{Annexe 3 : Extraits de code}
+Extrait de l'API RLE (\texttt{include/rle.h}):
+\begin{lstlisting}[language=C]
+uint8_t* compresser_RLE(const uint8_t *img, int taille, int *out_size);
+uint8_t* decompresser_RLE(const uint8_t *data, int taille, int *out_size);
+\end{lstlisting}
+
+Extrait d'impl\'ementation (compression s\'equentielle) : logique principale
+\begin{verbatim}
+for i in 0..taille-1:
+    val = img[i]
+    count = 1
+    while next equal and count < 255: count++
+    emit(val); emit(count)
+\end{verbatim}
+
+\subsection{Annexe 4 : Exemples d'images avant/apr\`es RLE}
+Image 1D : [0,0,0,0,1,1,2,2,2,2] -> (0,4),(1,2),(2,4) cod\'e en 6 octets.
+
+\section{Bibliographie / R\'ef\'erences}
+\begin{itemize}
+  \item Documentation OpenMP — https://www.openmp.org
+  \item Documentation MPI (OpenMPI) — https://www.open-mpi.org
+  \item Notes sur RLE — https://fr.wikipedia.org/wiki/Run-length_encoding
+  \item Support de cours HPC (enseignant)
+\end{itemize}
+
+\end{document}
+

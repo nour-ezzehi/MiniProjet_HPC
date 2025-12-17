@@ -1,0 +1,6 @@
+N=20
+NB_ROBOTS=4
+NB_ITERATIONS=20
+MODE=OPENMP
+IMAGE_FILE=data/image_test.txt
+²
